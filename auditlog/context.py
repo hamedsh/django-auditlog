@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from functools import partial
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import User
 from django.db.models.signals import pre_save
 
 from auditlog.models import LogEntry
@@ -14,28 +15,44 @@ auditlog_disabled = ContextVar("auditlog_disabled", default=False)
 
 @contextlib.contextmanager
 def set_actor(actor, remote_addr=None, remote_port=None):
+    yield from _set_logger_data(actor, {}, remote_addr, remote_port)
+
+
+@contextlib.contextmanager
+def set_auditlog_custom_data(actor: User = None, remote_addr: str = None, remote_port: str=None, **kwargs):
+    yield from _set_logger_data(actor, kwargs, remote_addr, remote_port)
+
+
+def _set_logger_data(actor, kwargs, remote_addr, remote_port):
+    try:
+        context_data = auditlog_value.get()
+    except LookupError:
+        context_data = {}
+    actor = actor or context_data.get('actor')
+    custom_data = context_data.get('custom_data', {})
+    custom_data.update(kwargs)
     """Connect a signal receiver with current user attached."""
-    # Initialize thread local storage
     context_data = {
-        "signal_duid": ("set_actor", time.time()),
+        "signal_duid": ("set_auditlog_custom_data", time.time()),
         "remote_addr": remote_addr,
+        "custom_data": custom_data,
         "remote_port": remote_port,
     }
-    auditlog_value.set(context_data)
-
+    if actor:
+        context_data['actor'] = actor
+    token = auditlog_value.set(context_data)
     # Connect signal for automatic logging
-    set_actor = partial(
-        _set_actor,
+    set_auditlog_custom_data = partial(
+        _set_auditlog_custom_data,
         user=actor,
-        signal_duid=context_data["signal_duid"],
+        signal_duid=context_data["signal_duid"]
     )
     pre_save.connect(
-        set_actor,
+        set_auditlog_custom_data,
         sender=LogEntry,
         dispatch_uid=context_data["signal_duid"],
         weak=False,
     )
-
     try:
         yield
     finally:
@@ -45,9 +62,10 @@ def set_actor(actor, remote_addr=None, remote_port=None):
             pass
         else:
             pre_save.disconnect(sender=LogEntry, dispatch_uid=auditlog["signal_duid"])
+            auditlog_value.reset(token)
 
 
-def _set_actor(user, sender, instance, signal_duid, **kwargs):
+def _set_auditlog_custom_data(user: User, sender, instance, signal_duid, **kwargs):
     """Signal receiver with extra 'user' and 'signal_duid' kwargs.
 
     This function becomes a valid signal receiver when it is curried with the actor and a dispatch id.
@@ -67,9 +85,9 @@ def _set_actor(user, sender, instance, signal_duid, **kwargs):
         ):
             instance.actor = user
             instance.actor_email = hasattr(user, "email") and user.email or None
-
         instance.remote_addr = auditlog["remote_addr"]
         instance.remote_port = auditlog["remote_port"]
+        instance.custom_data = auditlog["custom_data"]
 
 
 @contextlib.contextmanager

@@ -3,7 +3,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("auditlog", "0016_logentry_remote_port"),
+        ("auditlog", "0015_alter_logentry_changes"),
     ]
 
     operations = [
